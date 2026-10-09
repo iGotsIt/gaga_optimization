@@ -1,0 +1,10 @@
+# data files
+DATA
+PDB
+RESTARTS
+runs/
+
+*data*/
+*logs*/
+
+*.pyc
