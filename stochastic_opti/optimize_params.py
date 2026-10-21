@@ -1,3 +1,4 @@
+import pickle
 import fcntl
 import itertools
 import os
@@ -37,13 +38,13 @@ PARAMS = (
     "area3dto1d",
 )
 
-BOUNDS = [
-    (-2.7, 1),  # log10 ka_N
-    (-1.22, 1),  # log10 kb_N
-    (-2.0, 0.0),  # log10 ka_S1
-    (-1.5, 0.5),  # log10 kb_S1
-    (-2.0, 0.0),  # log10 ka_S2
-    (-1.5, 0.5),  # log10 kb_S2
+BOUNDS = [ # ~ 2 magnitude range for everything
+    (-2.7, -0.7),  # log10 ka_N
+    (-1.2, 1.3),  # log10 kb_N
+    (-1.1, 1.0),  # log10 ka_S1
+    (-0.83, 1.83),  # log10 kb_S1
+    (-1.7, 0.7),  # log10 ka_S2
+    (-0.9, 1.9),  # log10 kb_S2
     (1.0, 100.0),  # area3dto1d, linear
 ]
 
@@ -287,6 +288,87 @@ def assign_states(individual_id):
     return states
 
 
+
+def extract_subsequences(
+    states: list[int],
+    bracket_frames: int = 10,
+    max_inner_zero_run: int = 2,
+    min_nonzero_count: int = 2,
+) -> list[list[int]]:
+    """Extract all subsequences of the form
+       [bracket_frames zeros] + [binding event] + [bracket_frames zeros].
+
+    A "binding event" is a contiguous block of frames whose nonzero states
+    are separated by runs of zeros no longer than ``max_inner_zero_run``,
+    and which contains at least ``min_nonzero_count`` nonzero frames in total.
+
+    With the default settings and a 0.05 s frame stride this requires:
+      - 0.5 s of pure state 0 on each side (10 frames)
+      - the binding event may contain runs of up to 0.1 s of state 0 inside
+      - the event must contain at least 2 nonzero frames (so single isolated
+        nonzero frames flanked entirely by zeros are excluded)
+
+    Returns an empty list if no qualifying subsequences exist.
+
+    Trying to create single binding events here (not in the middle of a binding event) 
+    to avoid initial probability affecting likelihood estimates
+    """
+    s = list(states)
+    n = len(s)
+
+    nz = [i for i, v in enumerate(s) if v != 0]
+    if not nz:
+        return []
+
+    # Cluster nonzero indices into events.  Two consecutive nonzero frames
+    # belong to the same event if separated by ≤ max_inner_zero_run zeros.
+    events: list[tuple[int, int, int]] = []   # (first_nz, last_nz, count)
+    cur_start = nz[0]
+    cur_end   = nz[0]
+    cur_count = 1
+    for i in nz[1:]:
+        if i - cur_end - 1 <= max_inner_zero_run:
+            cur_end   = i
+            cur_count += 1
+        else:
+            events.append((cur_start, cur_end, cur_count))
+            cur_start, cur_end, cur_count = i, i, 1
+    events.append((cur_start, cur_end, cur_count))
+
+    out: list[list[int]] = []
+    for start, end, count in events:
+        if count < min_nonzero_count:
+            continue
+        if start < bracket_frames or end + bracket_frames >= n:
+            continue
+        # Bracket zones must be pure zeros.
+        if any(v != 0 for v in s[start - bracket_frames:start]):
+            continue
+        if any(v != 0 for v in s[end + 1:end + 1 + bracket_frames]):
+            continue
+        out.append(s[start - bracket_frames:end + 1 + bracket_frames])
+
+    return out
+
+
+def create_transition_counts(state_sequence, num_states=6):
+
+    """
+    Create a count matrix of transitions between states.
+
+    Args:
+        state_sequence (list): A list of states (integers).
+        num_states (int): The number of unique states.
+    """
+
+    transition_counts = np.zeros((num_states, num_states), dtype=int)
+
+    for current_state, next_state in itertools.pairwise(state_sequence):
+        transition_counts[current_state, next_state] += 1
+
+    return transition_counts
+
+
 def create_transition_matrix(state_sequence, num_states=6):
     """
     Create a transition matrix from a sequence of states.
@@ -296,17 +378,14 @@ def create_transition_matrix(state_sequence, num_states=6):
         num_states (int): The number of unique states.
     """
 
-    transition_matrix = np.zeros((num_states, num_states), dtype=int)
-
-    for current_state, next_state in itertools.pairwise(state_sequence):
-        transition_matrix[current_state, next_state] += 1
+    transition_counts = create_transition_counts(state_sequence, num_states)
 
     # Normalize the rows to get probabilities
-    row_sums = transition_matrix.sum(axis=1, keepdims=True)
+    row_sums = transition_counts.sum(axis=1, keepdims=True)
     transition_matrix = np.divide(
-        transition_matrix,
+        transition_counts,
         row_sums,
-        out=np.zeros_like(transition_matrix, dtype=float),
+        out=np.zeros_like(transition_counts, dtype=float),
         where=row_sums != 0,
     )
 
@@ -391,6 +470,7 @@ class Evaluator:
         self,
         initial_probabilities,
         transition_matrix,
+        transition_counts,
         callback,
         loss_function: Callable,
         logger=None,
@@ -399,8 +479,12 @@ class Evaluator:
 
         ## we smooth the transition matrix here for consistency with the loss functions
         self.transition_matrix = loss.smooth_probabilities(transition_matrix)
+        self.transition_counts = transition_counts
         self.logger = logger
         self.callback = callback
+
+
+        ## there's a little bit of error from smoothing the stationary 
         self.loss_function = loss_function
         self.stationary_distribution = get_stationary_distribution(transition_matrix)[0]
 
@@ -432,6 +516,8 @@ class Evaluator:
             simulation_stationary_distribution = get_stationary_distribution(
                 simulation_transition_matrix
             )[0]
+
+            simulated_counts = create_transition_counts(state_sequence)
 
             match self.loss_function:
                 case loss.negative_log_likelihood:
@@ -465,6 +551,23 @@ class Evaluator:
                     result = self.loss_function(
                         self.transition_matrix,
                         simulation_transition_matrix,
+                        self.stationary_distribution,
+                    )
+
+                case loss.KL_dirichlet_prior:
+                    result = self.loss_function(
+                        self.transition_matrix.shape[0],
+                        self.transition_counts,
+                        simulated_counts,
+                        self.stationary_distribution,
+                    )
+
+                case loss.symmetric_KL_dirichlet_prior:
+                    result = self.loss_function(
+                        self.transition_matrix.shape[0],
+                        simulated_counts,
+                        self.transition_counts,
+                        simulation_stationary_distribution,
                         self.stationary_distribution,
                     )
 
@@ -522,12 +625,20 @@ def run_loop(initial_params=None, loss_function=loss.symmetric_KL_divergence):
     # NLL infinite (and log() complain) the moment a simulation takes one. The
     # initial vector is left alone -- it has no exact zeros, and smoothing it
     # would substantially cheapen starting outside state 0.
-    transition_matrix = loss.smooth_probabilities(
-        np.load("transition_matrix_multi_precision.npy")
-    )
 
-    popsize = 100
-    maxiter = 10
+    # transition_matrix = loss.smooth_probabilities(
+    #     np.load("transition_matrix_multi_precision.npy")
+    # )
+
+    with open("multi_hmm_fit_results_multistart.pkl", "rb") as f:
+        hmm = pickle.load(f)
+
+    transition_matrix = hmm["transition_mat"]
+    transition_counts = hmm["trans_num"]
+
+
+    popsize = 14 ## 14 * 7 = 98 mutants per population
+    maxiter = 30 ## triple # iters
     tag = f"{popsize}_{maxiter}_{datetime.now():%Y%m%d_%H%M%S}_{loss_function.__name__}"
 
     eval_logger = EvalLogger(BASE_DIR / f"evaluations_{tag}.csv")
@@ -539,6 +650,7 @@ def run_loop(initial_params=None, loss_function=loss.symmetric_KL_divergence):
     evaluator = Evaluator(
         initial_probabilities,
         transition_matrix,
+        transition_counts,
         callback,
         loss_function,
         eval_logger,
@@ -556,6 +668,7 @@ def run_loop(initial_params=None, loss_function=loss.symmetric_KL_divergence):
         popsize=popsize,
         x0=initial_params,
         updating="deferred",
+        polish=False, # don't polish -- will speed up optimization
     )
 
     print(result)
@@ -594,6 +707,8 @@ if __name__ == "__main__":
         "symmetric_KL_divergence": loss.symmetric_KL_divergence,
         "wasserstein_1_distance": loss.wasserstein_1_distance,
         "experiment_weighted_wasserstein_1_distance": loss.experiment_weighted_wasserstein_1_distance,
+        "KL_dirichlet_prior": loss.KL_dirichlet_prior,
+        "symmetric_KL_dirichlet_prior": loss.symmetric_KL_dirichlet_prior,
     }
 
     main(

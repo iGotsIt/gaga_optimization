@@ -1,5 +1,8 @@
 import numpy as np
 import pickle
+from scipy.special import gammaln, digamma
+from scipy.stats import dirichlet
+
 
 # Unobserved transitions show up as exact zeros in the empirically fitted
 # matrix, which would make log(0) = -inf. Treat them as rare rather than
@@ -27,10 +30,10 @@ def smooth_probabilities(probabilities, pseudocount=PSEUDOCOUNT):
     np.ndarray: smoothed probabilities, same shape, with no exact zeros.
     """
     # only smooth if there are any zeros, otherwise return the original array
-    
+
     if np.all(probabilities > 0):
         return np.asarray(probabilities, dtype=float)
-    
+
     smoothed = np.asarray(probabilities, dtype=float) + pseudocount
     return smoothed / smoothed.sum(axis=-1, keepdims=True)
 
@@ -117,7 +120,12 @@ def symmetric_KL_divergence(A1, A2, PI_1: np.ndarray, PI_2: np.ndarray):
 
 def wasserstein_1_distance(A1, A2: np.ndarray):  ## suggested by Sho
     """count-normalized (probabilities)
-    Wasserstein-1 distance between two transition matrices"""
+    Wasserstein-1 distance between two transition matrices
+    
+    Actually, shouldn't this be a difference b/t CDFs?
+    I should do it cumulatively
+    
+    """
 
     A1 = smooth_probabilities(A1)
     A2 = smooth_probabilities(A2)
@@ -152,10 +160,73 @@ def experiment_weighted_wasserstein_1_distance(A1, A2: np.ndarray, PI_1: np.ndar
     return total_weighted_wasserstein_distance
 
 
-def KL_dirichlet_prior():
-    """ """
+def KL_dirichlet_prior(
+    n_states,
+    alpha_counts,
+    beta_counts,
+    stationary
+):
+    """KL divergence representing the transition matrix prior as a Dirichlet distribution.
+    A transition matrix is a square matrix where n_rows = n_cols = n_states
 
-    return
+    Based on https://stats.stackexchange.com/questions/611747/statistical-comparison-of-two-markov-chain-transition-matrices
+
+    This also takes into account the number of counts -- transitions with more counts are more trustworthy
+    than ones with less, even if they have the same probabilities. 
+    """
+    prior = np.ones(n_states)
+
+    row_kls = []
+
+    for i in range(n_states):
+        alpha = (
+            prior + alpha_counts[i]
+        )  # Dirichlet prior for row i of expected transition matrix
+
+        beta = (
+            prior + beta_counts[i]
+        )  # Dirichlet prior for row i of simulated transition matrix
+
+        ## KL divergence of 2 dirichlet distributions
+        ## from https://statproofbook.github.io/P/dir-kl.html
+
+        alpha_0 = np.sum(alpha)
+        beta_0 = np.sum(beta)
+
+        KL_exp_sim = (
+            gammaln(alpha_0)
+            - gammaln(beta_0)
+            - np.sum(gammaln(alpha) - gammaln(beta))
+            + np.sum((alpha - beta) * (digamma(alpha) - digamma(alpha_0)))
+        )
+
+        KL_exp_sim_weighted = KL_exp_sim * stationary[i]
+
+        row_kls.append(KL_exp_sim_weighted)
+
+    return np.sum(row_kls) ## sum over all rows to get total KL divergence
+
+
+def symmetric_KL_dirichlet_prior(
+    n_states,
+    simulated_counts,
+    expected_counts,
+    simulated_stationary,
+    expected_stationary,
+):
+    """
+    Symmetric KL divergence with a Dirichlet prior
+    """
+
+    KL_exp_sim = KL_dirichlet_prior(
+        n_states, expected_counts, simulated_counts, expected_stationary
+    )
+
+    KL_sim_exp = KL_dirichlet_prior(
+        n_states, simulated_counts, expected_counts, simulated_stationary
+    )
+
+    return (KL_exp_sim + KL_sim_exp) / 2
 
 
 def mean_squared_error(prediction, target):
