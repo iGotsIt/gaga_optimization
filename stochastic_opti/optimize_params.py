@@ -1,7 +1,8 @@
-import pickle
+import argparse
 import fcntl
 import itertools
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -11,12 +12,10 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+import loss
 import numpy as np
 import scipy as sp
 from scipy.optimize import OptimizeResult, differential_evolution
-
-import loss
-import argparse
 
 """
 Differential optimization of the parameters of the NERDSS simulation (mainly reaction rates) to fit experimental data.
@@ -136,6 +135,13 @@ def run_nerdss(params_text):
         raise RuntimeError(
             f"NERDSS failed with exit code {e.returncode}. See log file: {log_path}"
         ) from e
+
+
+def initial_params():
+    """Run a series of short NERDSS simulation until a binding event occurs so we can get a 
+    reasonable guess for the initial parameters"""
+
+    # Run a short simulation
 
 
 def parse_parms(individual_id):
@@ -307,9 +313,9 @@ def assign_states(individual_id):
 
 def extract_subsequences(
     states: list[int],
-    bracket_frames: int = 10,
-    max_inner_zero_run: int = 2,
-    min_nonzero_count: int = 2,
+    bracket_frames: int = 0,
+    max_inner_zero_run: int = 1,
+    min_nonzero_count: int = 5,
 ) -> list[list[int]]:
     """Extract all subsequences of the form
        [bracket_frames zeros] + [binding event] + [bracket_frames zeros].
@@ -319,15 +325,16 @@ def extract_subsequences(
     and which contains at least ``min_nonzero_count`` nonzero frames in total.
 
     With the default settings and a 0.05 s frame stride this requires:
-      - 0.5 s of pure state 0 on each side (10 frames)
-      - the binding event may contain runs of up to 0.1 s of state 0 inside
-      - the event must contain at least 2 nonzero frames (so single isolated
+    - ideally:
+      - 0.0 s of pure state 0 on each side (0 frames)
+      - the binding event may contain runs of up to 0.05 s of state 0 inside
+      - the event must contain at least 5 nonzero frames (so single isolated
         nonzero frames flanked entirely by zeros are excluded)
 
     Returns an empty list if no qualifying subsequences exist.
 
-    Trying to create single binding events here (not in the middle of a binding event)
-    to avoid initial probability affecting likelihood estimates
+    Trying to create single binding events here (not in the middle of a binding event) 
+    to avoid initial probability of zeros affecting estimates
     """
     s = list(states)
     n = len(s)
