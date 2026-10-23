@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import StratifiedKFold
 
 ## We can try different encoding methods: encoding the summary statistics directly, encoding the raw data,
 ## or using a "summary network" to get summaries (which I think is just encoding raw data but not sure)
@@ -36,7 +38,7 @@ class ConvNet(torch.nn.Module):
         )
         relu3 = torch.nn.ReLU()
 
-        adaptive_pool = torch.nn.AdaptiveAvgPool1d(
+        adaptive_pool = torch.nn.AdaptiveMaxPool1d(
             1
         )  # Adaptive pooling to get a fixed-size output --> (batch, output_dim, 1)
         flatten = torch.nn.Flatten()  # Flatten to (batch, output_dim)
@@ -66,7 +68,6 @@ class MLP(torch.nn.Module):
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, output_dim),
-            torch.nn.ReLU(),
         )
 
     def forward(self, x):
@@ -108,13 +109,13 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
     def __init__(self, data, labels):
         self.data = data
         self.labels = labels
-
+    
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx):
-        return torch.tensor(self.data[idx]).float(), torch.tensor(
-            self.labels[idx]
+    def __getitem__(self, index):
+        return torch.tensor(self.data[index]).float(), torch.tensor(
+            self.labels[index]
         ).long()
 
 
@@ -172,3 +173,50 @@ def train(dataset, epochs):
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}")
 
     return classifier, epoch_losses
+
+
+def test(dataset, classifier):
+    dataloader = TimeSeriesDataloader(dataset, batch_size=32, shuffle=False)
+
+    predictions = []
+    true_labels = []
+    classifier.eval()
+    with torch.no_grad():
+        for x_batch, y_batch in dataloader:
+            logits = classifier(x_batch)  # (B, 2)
+            predictions.append(logits.argmax(dim=1))  # (B,)
+            true_labels.append(y_batch)
+
+    predictions = torch.cat(predictions).numpy()
+    true_labels = torch.cat(true_labels).numpy()
+    accuracy = (predictions == true_labels).mean()
+    print(f"Test Accuracy: {accuracy:.4f}")
+    return accuracy, predictions, true_labels
+
+
+def k_fold_cross_validation(dataset, k=5, epochs=10, seed=0):
+    """
+    Stratified k-fold CV. Returns per-fold accuracies, per-fold confusion matrices
+    (rows = true label, cols = predicted label), and the confusion matrix summed over folds.
+    """
+    labels = np.array(dataset.labels).astype(int)
+    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+
+    accuracies = []
+    confusion_matrices = []
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(labels)), labels)):
+        print(f"Fold {fold + 1}/{k}")
+        train_dataset = torch.utils.data.Subset(dataset, train_idx)
+        val_dataset = torch.utils.data.Subset(dataset, val_idx)
+
+        classifier, _ = train(train_dataset, epochs)
+        accuracy, predictions, true_labels = test(val_dataset, classifier)
+        accuracies.append(accuracy)
+        confusion_matrices.append(
+            confusion_matrix(true_labels, predictions, labels=[0, 1])
+        )
+
+    total_confusion_matrix = np.sum(confusion_matrices, axis=0)
+    print(f"Accuracy over {k} folds: {np.mean(accuracies):.4f} +/- {np.std(accuracies):.4f}")
+    return accuracies, confusion_matrices, total_confusion_matrix

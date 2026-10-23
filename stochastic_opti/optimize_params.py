@@ -23,8 +23,9 @@ Differential optimization of the parameters of the NERDSS simulation (mainly rea
 
 We use differential evolution to search over large parameter spaces. 
 
-We use the -loglikelihood of seeing a sequence of states, as given by the transition matrix of an HMM fitted to experimental data,
-as the objective to optimize over. 
+We use different loss functions to compare the transition matrixes from the simulation to the transition matrix from the experimental data.
+Ideally, the loss functions should converge on the same set of parameters, as they all go to zero when the 
+simulation transition matrix matches the experimental transition matrix.
 """
 
 # parameters to optimize -- order must match BOUNDS, so this has to stay a sequence
@@ -38,14 +39,26 @@ PARAMS = (
     "area3dto1d",
 )
 
-BOUNDS = [ # ~ 2 magnitude range for everything
-    (-2.7, -0.7),  # log10 ka_N
-    (-1.2, 1.3),  # log10 kb_N
-    (-1.1, 1.0),  # log10 ka_S1
-    (-0.83, 1.83),  # log10 kb_S1
-    (-1.7, 0.7),  # log10 ka_S2
-    (-0.9, 1.9),  # log10 kb_S2
-    (1.0, 100.0),  # area3dto1d, linear
+THEORY_PARAMS = {
+    "ka_N": 0.02,
+    "kb_N": 1205,
+    "N_area3dto1d": 10.0,
+    "ka_S1": 7.92862118981782e-05, # 1D rate 
+    "kb_S1": 6.89,
+    "S1_area3dto1d": 1,
+    "ka_S2": 1.652251374449456e-05, # 1D rate
+    "kb_S2": 8.69,
+    "S2_area3dto1d": 1,
+}
+
+BOUNDS = [  # 3 magnitude range for everything except area3dto1d, 4 magnitude range for ka_N b/c i don't have an estimate
+    (-3, 1),  # log10 ka_N
+    (0, 3),  # log10 kb_N
+    (-4, -1),  # log10 ka_S1; 1D ka_s1 and ka_s2 go from 1e-6 to 1e-2 b/c of area3dto1d
+    (-1, 2),  # log10 kb_S1 
+    (-4, -1),  # log10 ka_S2 
+    (-1, 2),  # log10 kb_S2 
+    (10.0, 100.0),  # area3dto1d, linear
 ]
 
 assert len(PARAMS) == len(BOUNDS)
@@ -56,6 +69,7 @@ assert len(PARAMS) == len(BOUNDS)
 BASE_DIR = Path(__file__).resolve().parent
 MOL_FILES = ["P.mol", "N.mol", "S1.mol", "S2.mol"]
 NERDSS_BIN = os.environ.get("NERDSS_BIN", "nerdss")
+COORD_FILE = "initial_internal_coor.pdb"
 RUNS_DIR = BASE_DIR / "runs"
 
 # global variable to hold the template for the params file
@@ -105,7 +119,10 @@ def run_nerdss(params_text):
         # the .mol files don't exist
         os.symlink(BASE_DIR / mol, scratch / mol)
 
-    cmd = [NERDSS_BIN, "-f", "parms.inp"]
+    # Create a symlink to the initial coordinate file
+    os.symlink(BASE_DIR / COORD_FILE, scratch / COORD_FILE)
+
+    cmd = [NERDSS_BIN, "-f", "parms.inp", "-c", COORD_FILE]
     log_path = scratch / "nerdss.log"
     try:
         with log_path.open("w") as log_file:
@@ -288,7 +305,6 @@ def assign_states(individual_id):
     return states
 
 
-
 def extract_subsequences(
     states: list[int],
     bracket_frames: int = 10,
@@ -310,7 +326,7 @@ def extract_subsequences(
 
     Returns an empty list if no qualifying subsequences exist.
 
-    Trying to create single binding events here (not in the middle of a binding event) 
+    Trying to create single binding events here (not in the middle of a binding event)
     to avoid initial probability affecting likelihood estimates
     """
     s = list(states)
@@ -322,13 +338,13 @@ def extract_subsequences(
 
     # Cluster nonzero indices into events.  Two consecutive nonzero frames
     # belong to the same event if separated by ≤ max_inner_zero_run zeros.
-    events: list[tuple[int, int, int]] = []   # (first_nz, last_nz, count)
+    events: list[tuple[int, int, int]] = []  # (first_nz, last_nz, count)
     cur_start = nz[0]
-    cur_end   = nz[0]
+    cur_end = nz[0]
     cur_count = 1
     for i in nz[1:]:
         if i - cur_end - 1 <= max_inner_zero_run:
-            cur_end   = i
+            cur_end = i
             cur_count += 1
         else:
             events.append((cur_start, cur_end, cur_count))
@@ -342,17 +358,16 @@ def extract_subsequences(
         if start < bracket_frames or end + bracket_frames >= n:
             continue
         # Bracket zones must be pure zeros.
-        if any(v != 0 for v in s[start - bracket_frames:start]):
+        if any(v != 0 for v in s[start - bracket_frames : start]):
             continue
-        if any(v != 0 for v in s[end + 1:end + 1 + bracket_frames]):
+        if any(v != 0 for v in s[end + 1 : end + 1 + bracket_frames]):
             continue
-        out.append(s[start - bracket_frames:end + 1 + bracket_frames])
+        out.append(s[start - bracket_frames : end + 1 + bracket_frames])
 
     return out
 
 
 def create_transition_counts(state_sequence, num_states=6):
-
     """
     Create a count matrix of transitions between states.
 
@@ -483,8 +498,7 @@ class Evaluator:
         self.logger = logger
         self.callback = callback
 
-
-        ## there's a little bit of error from smoothing the stationary 
+        ## there's a little bit of error from smoothing the stationary
         self.loss_function = loss_function
         self.stationary_distribution = get_stationary_distribution(transition_matrix)[0]
 
@@ -636,9 +650,8 @@ def run_loop(initial_params=None, loss_function=loss.symmetric_KL_divergence):
     transition_matrix = hmm["transition_mat"]
     transition_counts = hmm["trans_num"]
 
-
-    popsize = 14 ## 14 * 7 = 98 mutants per population
-    maxiter = 30 ## triple # iters
+    popsize = 14  ## 14 * 7 = 98 mutants per population
+    maxiter = 30  ## triple # iters
     tag = f"{popsize}_{maxiter}_{datetime.now():%Y%m%d_%H%M%S}_{loss_function.__name__}"
 
     eval_logger = EvalLogger(BASE_DIR / f"evaluations_{tag}.csv")
@@ -668,11 +681,10 @@ def run_loop(initial_params=None, loss_function=loss.symmetric_KL_divergence):
         popsize=popsize,
         x0=initial_params,
         updating="deferred",
-        polish=False, # don't polish -- will speed up optimization
+        polish=False,  # don't polish -- will speed up optimization
     )
 
     print(result)
-
 
 
 def main(initial_params, loss_function):

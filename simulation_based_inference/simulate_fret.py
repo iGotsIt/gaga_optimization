@@ -21,8 +21,6 @@ stateindex = np.array(
     ]
 )
 
-sigmas = np.load("sigma.npy")  # covariance matrix for the variation within a trace
-
 
 class GaussianPDF:
     def __init__(self, mean, cov, seed):
@@ -62,24 +60,26 @@ def build_select_matrices(stateindex):
     return Mg, Mb, Mr
 
 
-def simulate_intensities_with_gaussian_pdf(state_sequence, means, cov, seed=42):
+def simulate_intensities_with_gaussian_pdf(state_sequence, means, cov, sigmas, seed=42):
     gaussian_pdf = GaussianPDF(means, cov, seed)
     mean_intensities = gaussian_pdf.sample(1)
     Mg, Mb, Mr = build_select_matrices(stateindex)
-    Nstates = stateindex.shape[0]
+    Nstates = stateindex.shape[1]
     M_all = [np.hstack([Mg[:, :, i], Mb[:, :, i], Mr[:, :, i]]) for i in range(Nstates)]
 
     state_intensity_distributions = []
     for state in range(Nstates):
         state_mean = M_all[state] @ mean_intensities.T
-        state_cov = sigmas[state]
+        state_cov = sigmas[:, :, state]
         state_distribution = GaussianPDF(state_mean.flatten(), state_cov, seed)
         state_intensity_distributions.append(state_distribution)
+
+    print("state_intensity_distributions size:", len(state_intensity_distributions))
 
     emissions = []
 
     for state in state_sequence:
         emission = state_intensity_distributions[state].sample(1).flatten()
         emissions.append(emission)
-        
+
     return np.array(emissions)
