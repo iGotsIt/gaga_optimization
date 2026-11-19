@@ -73,6 +73,34 @@ def _safe_log(probability):
     return np.log(max(float(probability), MIN_PROBABILITY))
 
 
+
+def KL_divergence_categorical(A1, A2):
+    """
+    unweighted KL divergence between two categorical distributions
+    """
+
+    A1 = smooth_probabilities(A1)
+    A2 = smooth_probabilities(A2)
+
+    kl = A1 * np.log(A1 / A2)
+
+    return sum(kl)  # sum over all rows to get total KL divergence
+
+
+def KL_divergence_categorical_symmetric(A1, A2):
+    """
+    symmetric KL divergence between two categorical distributions
+    """
+
+    A1 = smooth_probabilities(A1)
+    A2 = smooth_probabilities(A2)
+
+    kl_1 = A1 * np.log(A1 / A2)
+    kl_2 = A2 * np.log(A2 / A1)
+
+    return (sum(kl_1) + sum(kl_2)) / 2  # sum over all rows to get total KL divergence
+
+
 def KL_divergence(A1, A2, PI_1: np.ndarray):
     """
     count-normalized (probabilities) KL divergence between two transition matrices. from https://arxiv.org/pdf/2106.05669 and https://arxiv.org/pdf/2312.04863.
