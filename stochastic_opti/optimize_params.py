@@ -3,7 +3,6 @@ import contextlib
 import fcntl
 import itertools
 import os
-import pickle
 import shutil
 import subprocess
 import sys
@@ -463,8 +462,8 @@ def extract_subsequences(
 
     Returns an empty list if no qualifying subsequences exist.
 
-    Trying to create single binding events here (not in the middle of a binding event)
-    to avoid initial probability affecting likelihood estimates
+    Trying to create single binding events here (not in the middle of a binding event) 
+    to avoid initial probability of zeros affecting estimates
     """
     s = list(states)
     n = len(s)
