@@ -60,7 +60,26 @@ def build_select_matrices(stateindex):
     return Mg, Mb, Mr
 
 
-def simulate_intensities_with_gaussian_pdf(state_sequence, means, cov, sigmas, seed=42):
+def simulate_intensities_with_gaussian_pdf(
+    state_sequence, means, cov, sigmas, seed=None
+):
+    """
+    Simulate FRET intensities from a population-fit eb-HMM model.
+
+    Parameters
+    ----------
+    state_sequence : array-like
+        Sequence of states (0-based indices) to simulate.
+    means : np.ndarray
+        Hyperparameter for the distribution of mean intensities to draw from .
+    cov : np.ndarray
+        Hyperparameter for the distribution of mean intensities to draw from.
+    sigmas : np.ndarray
+        Shared covariance matrix for the emission distributions of each state.
+    seed : int, optional
+        Random seed for reproducibility.
+    """
+
     gaussian_pdf = GaussianPDF(means, cov, seed)
     mean_intensities = gaussian_pdf.sample(1)
     Mg, Mb, Mr = build_select_matrices(stateindex)
@@ -74,7 +93,7 @@ def simulate_intensities_with_gaussian_pdf(state_sequence, means, cov, sigmas, s
         state_distribution = GaussianPDF(state_mean.flatten(), state_cov, seed)
         state_intensity_distributions.append(state_distribution)
 
-    print("state_intensity_distributions size:", len(state_intensity_distributions))
+    # print("state_intensity_distributions size:", len(state_intensity_distributions))
 
     emissions = []
 
